@@ -30,6 +30,14 @@ public class Token implements IToken, Comparable<Token> {
         return epochCmp;
     }
 
+    public static Token min(Token a, Token b) {
+        if (a.compareTo(b) <= 0) {
+            return a;
+        } else {
+            return b;
+        }
+    }
+
     public static Token of(long epoch, long sequence) {
         return new Token(epoch, sequence);
     }
