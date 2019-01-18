@@ -2,10 +2,17 @@ package org.corfudb.runtime.checkpoint;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.fail;
-
 import com.google.common.collect.ImmutableMap;
 import com.google.common.reflect.TypeToken;
-import org.apache.velocity.context.AbstractContext;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+
 import org.corfudb.protocols.logprotocol.CheckpointEntry;
 import org.corfudb.protocols.logprotocol.MultiSMREntry;
 import org.corfudb.protocols.logprotocol.SMREntry;
@@ -25,10 +32,6 @@ import org.corfudb.util.serializer.ISerializer;
 import org.corfudb.util.serializer.Serializers;
 import org.junit.Before;
 import org.junit.Test;
-
-import java.util.*;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 
 /**
  * Basic smoke tests for checkpoint-in-stream PoC.
@@ -307,6 +310,9 @@ public class CheckpointSmokeTest extends AbstractViewTest {
         final String keyPrefixLast = "last";
         final int numKeys = 3;
         final String author = "Me, myself, and I";
+        final int base3 = 3;
+        final int base5 = 5;
+        final int base7 = 7;
         Map<String,Long> snapshot = new HashMap<>();
         // We assume that we start at global address 0.
         List<Map<String,Long>> history = new ArrayList<>();
@@ -329,6 +335,7 @@ public class CheckpointSmokeTest extends AbstractViewTest {
         CheckpointWriter<SMRMap> cpw = new CheckpointWriter(getRuntime(), streamId, author, (SMRMap) m);
         cpw.setSerializer(serializer);
         cpw.setBatchSize(1);
+        cpw.setNumCPThreads(1);
         cpw.setPostAppendFunc((cp, pos) -> {
             // No mutation, be we need to add a history snapshot at this START/END location.
             history.add(ImmutableMap.copyOf(snapshot));
@@ -362,11 +369,11 @@ public class CheckpointSmokeTest extends AbstractViewTest {
                 .isEqualTo(CheckpointEntry.CheckpointEntryType.START);
         assertThat(r.getAddressSpaceView().read(startAddress + 1).getCheckpointType())
                 .isEqualTo(CheckpointEntry.CheckpointEntryType.CONTINUATION);
-        assertThat(r.getAddressSpaceView().read(startAddress + 3).getCheckpointType())
+        assertThat(r.getAddressSpaceView().read(startAddress + base3).getCheckpointType())
                 .isEqualTo(CheckpointEntry.CheckpointEntryType.CONTINUATION);
-        assertThat(r.getAddressSpaceView().read(startAddress + 5).getCheckpointType())
+        assertThat(r.getAddressSpaceView().read(startAddress + base5).getCheckpointType())
                 .isEqualTo(CheckpointEntry.CheckpointEntryType.CONTINUATION);
-        assertThat(r.getAddressSpaceView().read(startAddress + 7).getCheckpointType())
+        assertThat(r.getAddressSpaceView().read(startAddress + base7).getCheckpointType())
                 .isEqualTo(CheckpointEntry.CheckpointEntryType.END);
 
         // Write last keys
