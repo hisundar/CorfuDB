@@ -165,6 +165,9 @@ public class FastObjectLoaderTest extends AbstractViewTest {
         FastObjectLoader fol = new FastObjectLoader(rt2)
                 .setDefaultObjectsType(CorfuTable.class);
 
+        fol.setBatchReadSize(1);
+        fol.setNumberOfPendingFutures(1);
+
         fol.loadMaps();
 
         assertThatMapsAreBuilt(rt2);
