@@ -2,10 +2,12 @@ package org.corfudb.runtime.view;
 
 import static java.util.Arrays.stream;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import javax.annotation.Nonnull;
@@ -108,8 +110,7 @@ public class LayoutView extends AbstractView {
      * @throws WrongEpochException wrong epoch number.
      */
     @SuppressWarnings("unchecked")
-    public Layout prepare(long epoch, long rank)
-            throws QuorumUnreachableException, OutrankedException, WrongEpochException {
+    public Layout prepare(long epoch, long rank) throws OutrankedException {
 
         CompletableFuture<LayoutPrepareResponse>[] prepareList = getLayout().getLayoutServers()
                 .stream()
@@ -124,14 +125,13 @@ public class LayoutView extends AbstractView {
                     return cf;
                 })
                 .toArray(CompletableFuture[]::new);
-        LayoutPrepareResponse[] acceptList;
+        final List <LayoutPrepareResponse> acceptList = new ArrayList<>();
         long timeouts = 0L;
         long wrongEpochRejected = 0L;
         while (true) {
             // do we still have enough for a quorum?
-            if (prepareList.length < getQuorumNumber()) {
-                log.debug("prepare: Quorum unreachable, remaining={}, required={}", prepareList,
-                        getQuorumNumber());
+            if ((prepareList.length + acceptList.size()) < getQuorumNumber()) {
+                log.debug("prepare: Quorum unreachable, remaining={}, required={}", prepareList, getQuorumNumber());
                 throw new QuorumUnreachableException(prepareList.length, getQuorumNumber());
             }
 
@@ -140,6 +140,8 @@ public class LayoutView extends AbstractView {
                 CFUtils.getUninterruptibly(CompletableFuture.anyOf(prepareList),
                         OutrankedException.class, TimeoutException.class, NetworkException.class,
                         WrongEpochException.class);
+            } catch (OutrankedException e) {
+                timeouts++;
             } catch (TimeoutException | NetworkException e) {
                 timeouts++;
             } catch (WrongEpochException we) {
@@ -148,30 +150,30 @@ public class LayoutView extends AbstractView {
 
             // remove errors.
             prepareList = stream(prepareList)
-                    .filter(x -> !x.isCompletedExceptionally())
-                    .toArray(CompletableFuture[]::new);
-            // count successes.
-            acceptList = stream(prepareList)
-                    .map(x -> {
+                    .filter(x -> {
                         try {
-                            return x.getNow(null);
+                            LayoutPrepareResponse layoutPrepareResponse = x.getNow(null);
+                            if (layoutPrepareResponse != null) {
+                                // count successes.
+                                acceptList.add(layoutPrepareResponse);
+                                return false;
+                            }
+                            return true;
                         } catch (Exception e) {
-                            return null;
+                            return false;
                         }
                     })
-                    .filter(x -> x != null)
-                    .toArray(LayoutPrepareResponse[]::new);
+                    .toArray(CompletableFuture[]::new);
 
-            log.debug("prepare: Successful responses={}, needed={}, timeouts={}, "
-                            + "wrongEpochRejected={}",
-                    acceptList.length, getQuorumNumber(), timeouts, wrongEpochRejected);
+            log.debug("prepare: Successful responses={}, needed={}, timeouts={}, wrongEpochRejected={}",
+                    acceptList.size(), getQuorumNumber(), timeouts, wrongEpochRejected);
 
-            if (acceptList.length >= getQuorumNumber()) {
+            if (acceptList.size() >= getQuorumNumber()) {
                 break;
             }
         }
         // Return any layouts that have been proposed before.
-        List<LayoutPrepareResponse> list = Arrays.stream(acceptList)
+        List<LayoutPrepareResponse> list = acceptList.stream()
                 .filter(x -> x.getLayout() != null)
                 .collect(Collectors.toList());
         if (list.isEmpty()) {
@@ -199,8 +201,7 @@ public class LayoutView extends AbstractView {
      * @throws OutrankedException outranked exception, i.e., higher rank.
      */
     @SuppressWarnings("unchecked")
-    public Layout propose(long epoch, long rank, Layout layout)
-            throws QuorumUnreachableException, OutrankedException {
+    public Layout propose(long epoch, long rank, Layout layout) throws OutrankedException {
         CompletableFuture<Boolean>[] proposeList = getLayout().getLayoutServers().stream()
                 .map(x -> {
                     CompletableFuture<Boolean> cf = new CompletableFuture<>();
@@ -216,11 +217,11 @@ public class LayoutView extends AbstractView {
 
         long timeouts = 0L;
         long wrongEpochRejected = 0L;
+        AtomicInteger acceptedProposals = new AtomicInteger(0);
         while (true) {
             // do we still have enough for a quorum?
-            if (proposeList.length < getQuorumNumber()) {
-                log.debug("propose: Quorum unreachable, remaining={}, required={}", proposeList,
-                        getQuorumNumber());
+            if ((proposeList.length + acceptedProposals.get()) < getQuorumNumber()) {
+                log.debug("propose: Quorum unreachable, remaining={}, required={}", proposeList, getQuorumNumber());
                 throw new QuorumUnreachableException(proposeList.length, getQuorumNumber());
             }
 
@@ -229,6 +230,8 @@ public class LayoutView extends AbstractView {
                 CFUtils.getUninterruptibly(CompletableFuture.anyOf(proposeList),
                         OutrankedException.class, TimeoutException.class, NetworkException.class,
                         WrongEpochException.class);
+            } catch (OutrankedException e) {
+                timeouts ++;
             } catch (TimeoutException | NetworkException e) {
                 timeouts++;
             } catch (WrongEpochException we) {
@@ -237,26 +240,24 @@ public class LayoutView extends AbstractView {
 
             // remove errors.
             proposeList = stream(proposeList)
-                    .filter(x -> !x.isCompletedExceptionally())
-                    .toArray(CompletableFuture[]::new);
-
-            // count successes.
-            long count = stream(proposeList)
-                    .map(x -> {
+                    .filter(x -> {
                         try {
-                            return x.getNow(false);
+                            if (x.getNow(false)) {
+                                // count successes.
+                                acceptedProposals.incrementAndGet();
+                                return false;
+                            }
                         } catch (Exception e) {
                             return false;
                         }
+                        return true;
                     })
-                    .filter(x -> x)
-                    .count();
+                    .toArray(CompletableFuture[]::new);
 
-            log.debug("propose: Successful responses={}, needed={}, timeouts={}, "
-                            + "wrongEpochRejected={}",
-                    count, getQuorumNumber(), timeouts, wrongEpochRejected);
+            log.debug("propose: Successful responses={}, needed={}, timeouts={}, wrongEpochRejected={}",
+                    acceptedProposals.get(), getQuorumNumber(), timeouts, wrongEpochRejected);
 
-            if (count >= getQuorumNumber()) {
+            if (acceptedProposals.get() >= getQuorumNumber()) {
                 break;
             }
         }
