@@ -31,6 +31,7 @@ import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuError;
 import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuInterruptedError;
 import org.corfudb.security.sasl.plaintext.PlainTextSaslNettyServer;
 import org.corfudb.security.tls.SslContextConstructor;
+import org.corfudb.util.CFUtils;
 import org.corfudb.util.GitRepositoryState;
 import org.corfudb.util.Version;
 import org.docopt.Docopt;
@@ -48,6 +49,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * This is the new Corfu server single-process executable.
@@ -315,14 +317,17 @@ public class CorfuServer {
             shutdownThread.setName("ShutdownThread");
             Runtime.getRuntime().addShutdownHook(shutdownThread);
 
-            startAndListen(serverContext.getBossGroup(),
+            ChannelFuture serverFuture = startAndListen(
+                    serverContext.getBossGroup(),
                     serverContext.getWorkerGroup(),
                     b -> configureBootstrapOptions(serverContext, b),
                     serverContext,
                     router,
                     (String) opts.get("--address"),
-                    port).channel().closeFuture().syncUninterruptibly();
-        } catch (Exception e) {
+                    port
+            );
+            serverFuture.channel().closeFuture().syncUninterruptibly();
+        } catch (Throwable e) {
             log.error("CorfuServer: Server exiting due to unrecoverable error: ", e);
             System.exit(EXIT_ERROR_CODE);
         }
@@ -513,11 +518,11 @@ public class CorfuServer {
         final Map<String, Object> opts = serverContext.getServerConfig();
         final boolean bindToAllInterfaces = serverContext.isBindToAllInterfaces();
 
-        corfuServerThread = new Thread(() -> {
+        Runnable restartAction = () -> {
             cleanShutdown(serverContext.getServers());
+
             if (resetData && !(Boolean) serverContext.getServerConfig().get("--memory")) {
-                File serviceDir = new File((String) serverContext.getServerConfig()
-                        .get("--log-path"));
+                File serviceDir = new File((String) serverContext.getServerConfig().get("--log-path"));
                 try {
                     FileUtils.cleanDirectory(serviceDir);
                 } catch (IOException ioe) {
@@ -529,18 +534,19 @@ public class CorfuServer {
             // Wait for previous server thread to join.
             try {
                 previousServerThread.join();
-                Runtime.getRuntime().removeShutdownHook(shutdownThread);
             } catch (InterruptedException ie) {
                 throw new UnrecoverableCorfuInterruptedError(ie);
+            } finally {
+                Runtime.getRuntime().removeShutdownHook(shutdownThread);
             }
-
-            Runtime.getRuntime().removeShutdownHook(shutdownThread);
 
             // Restart the server.
             log.info("RestartServer: Restarting corfu server");
             printStartupMsg(opts);
             startServer(opts, bindToAllInterfaces);
-        });
+        };
+
+        corfuServerThread = new Thread(restartAction);
         corfuServerThread.setName("CorfuServer");
         corfuServerThread.start();
     }
@@ -553,29 +559,30 @@ public class CorfuServer {
 
         // A executor service to create the shutdown threads
         // plus name the threads correctly.
-        final ExecutorService shutdownService =
-                Executors.newFixedThreadPool(servers.size());
+        final ExecutorService shutdownService = Executors.newFixedThreadPool(servers.size());
 
         // Turn into a list of futures on the shutdown, returning
         // generating a log message to inform of the result.
-        CompletableFuture[] shutdownFutures = servers.stream()
-                .map(s -> CompletableFuture.runAsync(() -> {
-                    try {
-                        Thread.currentThread().setName(s.getClass().getSimpleName()
-                                + "-shutdown");
-                        log.info("CleanShutdown: Shutting down {}",
-                                s.getClass().getSimpleName());
-                        s.shutdown();
-                        log.info("CleanShutdown: Cleanly shutdown {}",
-                                s.getClass().getSimpleName());
-                    } catch (Exception e) {
-                        log.error("CleanShutdown: Failed to cleanly shutdown {}",
-                                s.getClass().getSimpleName(), e);
-                    }
-                }, shutdownService))
-                .toArray(CompletableFuture[]::new);
+        List<CompletableFuture<Void>> shutdownFutures = servers.stream()
+                .map(server -> {
+                    Runnable shutdownAction = () -> {
+                        String serverName = server.getClass().getSimpleName();
+                        try {
+                            Thread.currentThread().setName(serverName + "-shutdown");
+                            log.info("CleanShutdown: Shutting down {}", serverName);
+                            server.shutdown();
+                            log.info("CleanShutdown: Cleanly shutdown {}", serverName);
+                        } catch (Exception e) {
+                            log.error("CleanShutdown: Failed to cleanly shutdown {}", serverName, e);
+                        }
+                    };
 
-        CompletableFuture.allOf(shutdownFutures).join();
+                    return CompletableFuture.runAsync(shutdownAction, shutdownService);
+                })
+                .collect(Collectors.toList());
+
+        CFUtils.allOf(shutdownFutures).join();
+
         log.info("CleanShutdown: Shutdown Complete.");
     }
 

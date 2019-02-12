@@ -117,7 +117,7 @@ public class InMemoryStreamLog implements StreamLog, StreamLogWithRankedAddressS
 
     @Override
     public void close() {
-        logCache = new HashMap();
+        logCache = new HashMap<>();
     }
 
     @Override

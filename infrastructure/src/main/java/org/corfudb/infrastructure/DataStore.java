@@ -1,11 +1,21 @@
 package org.corfudb.infrastructure;
 
+import static org.corfudb.infrastructure.utils.Persistence.syncDirectory;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheWriter;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.RemovalCause;
+import com.google.common.hash.Hasher;
+import com.google.common.hash.Hashing;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.corfudb.runtime.exceptions.DataCorruptionException;
+import org.corfudb.util.JsonUtils;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -16,20 +26,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.function.Consumer;
-
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-
-import com.google.common.hash.Hasher;
-import com.google.common.hash.Hashing;
-
-import lombok.extern.slf4j.Slf4j;
-import lombok.Getter;
-
-import org.corfudb.runtime.exceptions.DataCorruptionException;
-import org.corfudb.util.JsonUtils;
-
-import static org.corfudb.infrastructure.utils.Persistence.syncDirectory;
 
 /**
  * Stores data as JSON.
@@ -75,8 +71,7 @@ public class DataStore implements IDataStore {
     public DataStore(@Nonnull Map<String, Object> opts,
                      @Nonnull Consumer<String> cleanupTask) {
 
-        if ((opts.get("--memory") != null && (Boolean) opts.get("--memory"))
-                || opts.get("--log-path") == null) {
+        if ((opts.containsKey("--memory") && (Boolean) opts.get("--memory")) || !opts.containsKey("--log-path")) {
             this.logDirPath = null;
             this.cleanupTask = fileName -> { };
             cache = buildMemoryDs();
@@ -169,7 +164,7 @@ public class DataStore implements IDataStore {
 
     @Override
     public synchronized <T> void put(Class<T> tclass, String prefix, String key, T value) {
-        cache.put(getKey(prefix, key), value);
+        put(value, new KvRecord<>(prefix, key, tclass));
     }
 
     private <T> T load(Class<T> tClass, String key) {
@@ -204,10 +199,25 @@ public class DataStore implements IDataStore {
 
     @Override
     public synchronized <T> T get(Class<T> tclass, String prefix, String key) {
-        String path = getKey(prefix, key);
+        return get(new KvRecord<>(prefix, key, tclass));
+    }
+
+    @Override
+    public synchronized <T> void delete(Class<T> tclass, String prefix, String key) {
+        delete(new KvRecord<>(prefix, key, tclass));
+    }
+
+    @Override
+    public synchronized <T> void put(T value, KvRecord<T> record) {
+        cache.put(record.getFullKeyName(), value);
+    }
+
+    @Override
+    public synchronized <T> T get(KvRecord<T> record) {
+        String path = record.getFullKeyName();
         Object val = cache.get(path, k -> {
             if (!inMem) {
-                T loadedVal = load(tclass, path);
+                T loadedVal = load(record.getDataType(), path);
                 if (loadedVal != null) {
                     return loadedVal;
                 }
@@ -222,11 +232,7 @@ public class DataStore implements IDataStore {
     }
 
     @Override
-    public synchronized <T> void delete(Class<T> tclass, String prefix, String key) {
-        cache.invalidate(getKey(prefix, key));
-    }
-
-    private String getKey(String prefix, String key) {
-        return prefix + "_" + key;
+    public synchronized <T> void delete(KvRecord<T> record) {
+        cache.invalidate(record.getFullKeyName());
     }
 }

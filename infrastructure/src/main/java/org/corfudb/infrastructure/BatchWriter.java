@@ -3,7 +3,16 @@ package org.corfudb.infrastructure;
 import com.github.benmanes.caffeine.cache.CacheWriter;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import lombok.extern.slf4j.Slf4j;
+import org.corfudb.infrastructure.BatchWriterOperation.Type;
+import org.corfudb.infrastructure.log.StreamLog;
+import org.corfudb.protocols.wireprotocol.LogData;
+import org.corfudb.protocols.wireprotocol.TailsResponse;
+import org.corfudb.protocols.wireprotocol.Token;
+import org.corfudb.runtime.exceptions.WrongEpochException;
+import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuInterruptedError;
 
+import javax.annotation.Nonnull;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
@@ -12,18 +21,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-
-import javax.annotation.Nonnull;
-
-import lombok.extern.slf4j.Slf4j;
-
-import org.corfudb.infrastructure.BatchWriterOperation.Type;
-import org.corfudb.infrastructure.log.StreamLog;
-import org.corfudb.protocols.wireprotocol.LogData;
-import org.corfudb.protocols.wireprotocol.TailsResponse;
-import org.corfudb.protocols.wireprotocol.Token;
-import org.corfudb.runtime.exceptions.WrongEpochException;
-import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuInterruptedError;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * BatchWriter is a class that will intercept write-through calls to batch and
@@ -34,17 +32,19 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
 
     static final int BATCH_SIZE = 50;
 
-    final boolean sync;
+    private final boolean sync;
 
-    private StreamLog streamLog;
+    private final StreamLog streamLog;
 
-    private BlockingQueue<BatchWriterOperation> operationsQueue;
+    private final BlockingQueue<BatchWriterOperation> operationsQueue;
 
-    final ExecutorService writerService = Executors
+    private final ExecutorService writerService = Executors
             .newSingleThreadExecutor(new ThreadFactoryBuilder()
                     .setDaemon(false)
                     .setNameFormat("LogUnit-Write-Processor-%d")
                     .build());
+
+    private final AtomicBoolean shutdown = new AtomicBoolean();
 
     /**
      * The sealEpoch is the epoch up to which all operations have been sealed. Any
@@ -74,7 +74,7 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
     @Override
     public void write(@Nonnull K key, @Nonnull V value) {
         try {
-            CompletableFuture<Void> cf = new CompletableFuture();
+            CompletableFuture<Void> cf = new CompletableFuture<>();
             operationsQueue.add(new BatchWriterOperation(BatchWriterOperation.Type.WRITE,
                     (Long) key, (LogData) value, ((LogData) value).getEpoch(), null, cf));
             cf.get();
@@ -90,7 +90,7 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
 
     public void bulkWrite(List<LogData> entries, long epoch) {
         try {
-            CompletableFuture<Void> cf = new CompletableFuture();
+            CompletableFuture<Void> cf = new CompletableFuture<>();
             operationsQueue.add(new BatchWriterOperation(BatchWriterOperation.Type.RANGE_WRITE,
                     null, null, epoch, entries, cf));
         } catch (Exception e) {
@@ -110,7 +110,7 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
      */
     public void prefixTrim(@Nonnull Token address) {
         try {
-            CompletableFuture<Void> cf = new CompletableFuture();
+            CompletableFuture<Void> cf = new CompletableFuture<>();
             operationsQueue.add(new BatchWriterOperation(BatchWriterOperation.Type.PREFIX_TRIM,
                     address.getSequence(), null, address.getEpoch(), null, cf));
             cf.get();
@@ -135,23 +135,6 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
         try {
             CompletableFuture<Void> cf = new CompletableFuture<>();
             operationsQueue.add(new BatchWriterOperation(Type.SEAL, null, null, epoch, null, cf));
-            cf.get();
-        } catch (Exception e) {
-            if (e.getCause() instanceof RuntimeException) {
-                throw (RuntimeException) e.getCause();
-            } else {
-                throw new RuntimeException(e);
-            }
-        }
-    }
-
-    /**
-     * Reset the log unit node.
-     */
-    public void reset(@Nonnull long epoch) {
-        try {
-            CompletableFuture<Void> cf = new CompletableFuture<>();
-            operationsQueue.add(new BatchWriterOperation(Type.RESET, null, null, epoch, null, cf));
             cf.get();
         } catch (Exception e) {
             if (e.getCause() instanceof RuntimeException) {
@@ -208,8 +191,7 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
                 } else {
                     currOp = operationsQueue.poll();
 
-                    if (currOp == null || processed == BATCH_SIZE
-                            || currOp == BatchWriterOperation.SHUTDOWN) {
+                    if (currOp == null || processed == BATCH_SIZE || currOp == BatchWriterOperation.SHUTDOWN) {
                         streamLog.sync(sync);
                         log.trace("Sync'd {} writes", processed);
 
@@ -254,10 +236,6 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
                                 streamLog.append(currOp.getEntries());
                                 res.add(currOp);
                                 break;
-                            case RESET:
-                                streamLog.reset();
-                                res.add(currOp);
-                                break;
                             case TAILS_QUERY:
                                 TailsResponse tails = streamLog.getTails();
                                 currOp.getFuture().complete(tails);
@@ -294,4 +272,14 @@ public class BatchWriter<K, V> implements CacheWriter<K, V>, AutoCloseable {
         }
     }
 
+    /**
+     * Reset batch writer
+     */
+    public void reset() {
+        shutdown.set(true);
+        operationsQueue.clear();
+        operationsQueue.add(BatchWriterOperation.SHUTDOWN);
+
+        writerService.shutdown();
+    }
 }

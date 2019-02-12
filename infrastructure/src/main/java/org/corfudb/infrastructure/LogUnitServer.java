@@ -1,13 +1,15 @@
 package org.corfudb.infrastructure;
 
+import static org.corfudb.infrastructure.ServerThreadFactory.ExceptionHandler;
+
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
-import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.google.common.annotations.VisibleForTesting;
 import io.netty.channel.ChannelHandlerContext;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.io.FileUtils;
 import org.corfudb.infrastructure.log.InMemoryStreamLog;
 import org.corfudb.infrastructure.log.StreamLog;
 import org.corfudb.infrastructure.log.StreamLogCompaction;
@@ -31,7 +33,6 @@ import org.corfudb.runtime.exceptions.DataOutrankedException;
 import org.corfudb.runtime.exceptions.OverwriteException;
 import org.corfudb.runtime.exceptions.TrimmedException;
 import org.corfudb.runtime.exceptions.ValueAdoptedException;
-import org.corfudb.util.Utils;
 
 import java.lang.invoke.MethodHandles;
 import java.util.List;
@@ -39,6 +40,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 
 /**
@@ -80,10 +82,11 @@ public class LogUnitServer extends AbstractServer {
      * it is not backed by anything, but in a disk implementation it is backed by persistent
      * storage.
      */
-    private final LoadingCache<Long, ILogData> dataCache;
-    private final StreamLog streamLog;
+    private final AtomicReference<LoadingCache<Long, ILogData>> dataCache = new AtomicReference<>();
+    private final AtomicReference<StreamLog> streamLog = new AtomicReference<>();
+    private final AtomicReference<BatchWriter<Long, ILogData>> batchWriter = new AtomicReference<>();
+
     private final StreamLogCompaction logCleaner;
-    private final BatchWriter<Long, ILogData> batchWriter;
 
     private final ExecutorService executor;
 
@@ -94,36 +97,48 @@ public class LogUnitServer extends AbstractServer {
 
     /**
      * Returns a new LogUnitServer.
+     *
      * @param serverContext context object providing settings and objects
      */
     public LogUnitServer(ServerContext serverContext) {
         this.serverContext = serverContext;
         this.config = LogUnitServerConfig.parse(serverContext.getServerConfig());
-        executor = Executors.newFixedThreadPool(serverContext.getLogunitThreadCount(),
-                new ServerThreadFactory("LogUnit-", new ServerThreadFactory.ExceptionHandler()));
 
+        executor = Executors.newFixedThreadPool(
+                serverContext.getLogunitThreadCount(),
+                new ServerThreadFactory("LogUnit-", new ExceptionHandler())
+        );
+
+        init(serverContext);
+
+        logCleaner = new StreamLogCompaction(streamLog.get(), 10, 45, TimeUnit.MINUTES, ServerContext.SHUTDOWN_TIMER);
+    }
+
+    private synchronized void init(ServerContext serverContext) {
         if (config.isMemoryMode()) {
-            log.warn("Log unit opened in-memory mode (Maximum size={}). "
-                    + "This should be run for testing purposes only. "
-                    + "If you exceed the maximum size of the unit, old entries will be "
-                    + "AUTOMATICALLY trimmed. "
-                    + "The unit WILL LOSE ALL DATA if it exits.", Utils
-                    .convertToByteStringRepresentation(config.getMaxCacheSize()));
-            streamLog = new InMemoryStreamLog();
+            String warnMessage = "Log unit opened in-memory mode (Maximum size={}). " +
+                    "This should be run for testing purposes only. " +
+                    "If you exceed the maximum size of the unit, old entries will be AUTOMATICALLY trimmed. " +
+                    "The unit WILL LOSE ALL DATA if it exits.";
+
+            log.warn(warnMessage, FileUtils.byteCountToDisplaySize(config.getMaxCacheSize()));
+            streamLog.set(new InMemoryStreamLog());
         } else {
-            streamLog = new StreamLogFiles(serverContext, config.isNoVerify());
+            streamLog.set(new StreamLogFiles(serverContext, config.isNoVerify()));
         }
 
-        batchWriter = new BatchWriter<>(streamLog, serverContext.getServerEpoch(), !config.isNoSync());
+        batchWriter.set(new BatchWriter<>(streamLog.get(), serverContext.getServerEpoch(), !config.isNoSync()));
 
-        dataCache = Caffeine.newBuilder()
-                .<Long, ILogData>weigher((k, v) -> ((LogData) v).getData() == null ? 1 : ((LogData) v).getData().length)
+        LoadingCache<Long, ILogData> cache = Caffeine.newBuilder()
+                .weigher((k, v) -> {
+                    byte[] logData = ((LogData) v).getData();
+                    return logData == null ? 1 : logData.length;
+                })
                 .maximumWeight(config.getMaxCacheSize())
-                .removalListener(this::handleEviction)
-                .writer(batchWriter)
+                .writer(batchWriter.get())
                 .build(this::handleRetrieval);
 
-        logCleaner = new StreamLogCompaction(streamLog, 10, 45, TimeUnit.MINUTES, ServerContext.SHUTDOWN_TIMER);
+        dataCache.set(cache);
     }
 
     /**
@@ -131,7 +146,7 @@ public class LogUnitServer extends AbstractServer {
      */
     @ServerHandler(type = CorfuMsgType.TAIL_REQUEST)
     public void handleTailRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
-        TailsResponse tails = batchWriter.queryTails(msg.getEpoch());
+        TailsResponse tails = batchWriter.get().queryTails(msg.getEpoch());
         r.sendResponse(ctx, msg, CorfuMsgType.TAIL_RESPONSE.payloadMsg(tails));
     }
 
@@ -140,7 +155,7 @@ public class LogUnitServer extends AbstractServer {
      */
     @ServerHandler(type = CorfuMsgType.TRIM_MARK_REQUEST)
     public void handleHeadRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
-        r.sendResponse(ctx, msg, CorfuMsgType.TRIM_MARK_RESPONSE.payloadMsg(streamLog.getTrimMark()));
+        r.sendResponse(ctx, msg, CorfuMsgType.TRIM_MARK_RESPONSE.payloadMsg(streamLog.get().getTrimMark()));
     }
 
     /**
@@ -154,7 +169,7 @@ public class LogUnitServer extends AbstractServer {
         try {
             LogData logData = (LogData) msg.getPayload().getData();
             logData.setEpoch(msg.getEpoch());
-            dataCache.put(msg.getPayload().getGlobalAddress(), logData);
+            dataCache.get().put(msg.getPayload().getGlobalAddress(), logData);
             r.sendResponse(ctx, msg, CorfuMsgType.WRITE_OK.msg());
 
         } catch (OverwriteException ex) {
@@ -173,8 +188,8 @@ public class LogUnitServer extends AbstractServer {
         ReadResponse rr = new ReadResponse();
         try {
             for (Long l = msg.getPayload().getRange().lowerEndpoint();
-                    l < msg.getPayload().getRange().upperEndpoint() + 1L; l++) {
-                ILogData e = dataCache.get(l);
+                 l < msg.getPayload().getRange().upperEndpoint() + 1L; l++) {
+                ILogData e = dataCache.get().get(l);
                 if (e == null) {
                     rr.put(l, LogData.getEmpty(l));
                 } else {
@@ -194,7 +209,7 @@ public class LogUnitServer extends AbstractServer {
         ReadResponse rr = new ReadResponse();
         try {
             for (Long l : msg.getPayload().getAddresses()) {
-                ILogData e = dataCache.get(l);
+                ILogData e = dataCache.get().get(l);
                 if (e == null) {
                     rr.put(l, LogData.getEmpty(l));
                 } else {
@@ -215,7 +230,7 @@ public class LogUnitServer extends AbstractServer {
             log.debug("fillHole: filling address {}, epoch {}", address, msg.getEpoch());
             LogData hole = LogData.getHole(address.getSequence());
             hole.setEpoch(msg.getEpoch());
-            dataCache.put(address.getSequence(), hole);
+            dataCache.get().put(address.getSequence(), hole);
             r.sendResponse(ctx, msg, CorfuMsgType.WRITE_OK.msg());
 
         } catch (OverwriteException e) {
@@ -234,7 +249,7 @@ public class LogUnitServer extends AbstractServer {
                             IServerRouter r) {
         try {
             TrimRequest req = msg.getPayload();
-            batchWriter.prefixTrim(req.getAddress());
+            batchWriter.get().prefixTrim(req.getAddress());
             r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
         } catch (TrimmedException ex) {
             r.sendResponse(ctx, msg, CorfuMsgType.ERROR_TRIMMED.msg());
@@ -244,7 +259,7 @@ public class LogUnitServer extends AbstractServer {
     @ServerHandler(type = CorfuMsgType.COMPACT_REQUEST)
     private void compact(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
         try {
-            streamLog.compact();
+            streamLog.get().compact();
             r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
         } catch (RuntimeException ex) {
             log.error("Internal Error");
@@ -256,7 +271,7 @@ public class LogUnitServer extends AbstractServer {
     @ServerHandler(type = CorfuMsgType.FLUSH_CACHE)
     private void flushCache(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
         try {
-            dataCache.invalidateAll();
+            dataCache.get().invalidateAll();
         } catch (RuntimeException e) {
             log.error("Encountered error while flushing cache {}", e);
         }
@@ -269,50 +284,52 @@ public class LogUnitServer extends AbstractServer {
      */
     @ServerHandler(type = CorfuMsgType.RANGE_WRITE)
     private void rangeWrite(CorfuPayloadMsg<RangeWriteMsg> msg,
-                                  ChannelHandlerContext ctx, IServerRouter r) {
+                            ChannelHandlerContext ctx, IServerRouter r) {
         List<LogData> entries = msg.getPayload().getEntries();
-        batchWriter.bulkWrite(entries, msg.getEpoch());
+        batchWriter.get().bulkWrite(entries, msg.getEpoch());
         r.sendResponse(ctx, msg, CorfuMsgType.WRITE_OK.msg());
     }
 
     /**
      * Seal the server with the epoch.
-     *
+     * <p>
      * - A seal operation is inserted in the queue and then we wait to flush all operations
-     *   in the queue before this operation.
+     * in the queue before this operation.
      * - All operations after this operation but stamped with an older epoch will be failed.
      */
     @Override
     public void sealServerWithEpoch(long epoch) {
-        batchWriter.waitForSealComplete(epoch);
+        batchWriter.get().waitForSealComplete(epoch);
         log.info("LogUnit sealServerWithEpoch: sealed and flushed with epoch {}", epoch);
     }
 
     /**
      * Resets the log unit server via the BatchWriter.
      * Warning: Clears all data.
-     *
+     * <p>
      * - The epochWaterMark is set to prevent resetting log unit multiple times during
-     *   same epoch.
+     * same epoch.
      * - After this the reset operation is inserted which resets and clears all data.
      * - Finally the cache is invalidated to purge the existing entries.
      */
     @ServerHandler(type = CorfuMsgType.RESET_LOGUNIT)
-    private synchronized void resetLogUnit(CorfuPayloadMsg<Long> msg,
-                                           ChannelHandlerContext ctx, IServerRouter r) {
+    private synchronized void resetLogUnit(CorfuPayloadMsg<Long> msg, ChannelHandlerContext ctx, IServerRouter r) {
         // Check if the reset request is with an epoch greater than the last reset epoch seen to
         // prevent multiple reset in the same epoch. and should be equal to the current router
         // epoch to prevent stale reset requests from wiping out the data.
-        if (msg.getPayload() > serverContext.getLogUnitEpochWaterMark()
-                && msg.getPayload() == serverContext.getServerEpoch()) {
-            serverContext.setLogUnitEpochWaterMark(msg.getPayload());
-            batchWriter.reset(msg.getPayload());
-            dataCache.invalidateAll();
-            log.info("LogUnit Server Reset.");
-        } else {
+        if (msg.getPayload() <= serverContext.getLogUnitEpochWaterMark() ||
+                msg.getPayload() != serverContext.getServerEpoch()) {
             log.info("LogUnit Server Reset request received but reset already done.");
+            r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
+            return;
         }
-        r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
+
+        serverContext.setLogUnitEpochWaterMark(msg.getPayload());
+
+        batchWriter.get().close();
+        streamLog.get().reset();
+        init(serverContext);
+        log.info("LogUnit Server Reset.");
     }
 
     /**
@@ -320,19 +337,15 @@ public class LogUnitServer extends AbstractServer {
      *
      * @param address The address to retrieve the entry from.
      * @return The log unit entry to retrieve into the cache.
-     *
-     *     This function should not care about trimmed addresses, as that is handled in
-     *     the read() and append(). Any address that cannot be retrieved should be returned as
-     *     unwritten (null).
+     * <p>
+     * This function should not care about trimmed addresses, as that is handled in
+     * the read() and append(). Any address that cannot be retrieved should be returned as
+     * unwritten (null).
      */
     private synchronized ILogData handleRetrieval(long address) {
-        LogData entry = streamLog.read(address);
+        LogData entry = streamLog.get().read(address);
         log.trace("Retrieved[{} : {}]", address, entry);
         return entry;
-    }
-
-    private synchronized void handleEviction(long address, ILogData entry, RemovalCause cause) {
-        log.trace("Eviction[{}]: {}", address, cause);
     }
 
     /**
@@ -342,12 +355,12 @@ public class LogUnitServer extends AbstractServer {
     public void shutdown() {
         super.shutdown();
         logCleaner.shutdown();
-        batchWriter.close();
+        batchWriter.get().close();
     }
 
     @VisibleForTesting
     public LoadingCache<Long, ILogData> getDataCache() {
-        return dataCache;
+        return dataCache.get();
     }
 
     @VisibleForTesting
