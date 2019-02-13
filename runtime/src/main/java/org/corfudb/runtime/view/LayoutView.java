@@ -14,6 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import org.corfudb.protocols.wireprotocol.LayoutPrepareResponse;
 import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.exceptions.AlreadyBootstrappedException;
 import org.corfudb.runtime.exceptions.NetworkException;
 import org.corfudb.runtime.exceptions.OutrankedException;
 import org.corfudb.runtime.exceptions.QuorumUnreachableException;
@@ -323,6 +324,24 @@ public class LayoutView extends AbstractView {
                     .toArray(CompletableFuture[]::new);
 
             log.debug("committed: Successful responses={}, timeouts={}", responses, timeouts);
+        }
+    }
+
+    /**
+     * Bootstraps the layout server of the specified node.
+     * If already bootstrapped, it completes silently.
+     *
+     * @param endpoint Endpoint to bootstrap.
+     * @param layout   Layout to bootstrap with.
+     */
+    public void bootstrapLayoutServer(@Nonnull String endpoint, @Nonnull Layout layout) {
+        try {
+            CFUtils.getUninterruptibly(getRuntimeLayout(layout)
+                    .getLayoutClient(endpoint)
+                    .bootstrapLayout(layout), AlreadyBootstrappedException.class);
+            log.info("bootstrapLayoutServer: Layout Server bootstrap successful.");
+        } catch (AlreadyBootstrappedException abe) {
+            log.info("bootstrapLayoutServer: Layout Server already bootstrapped.");
         }
     }
 }

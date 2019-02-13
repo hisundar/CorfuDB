@@ -8,7 +8,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -97,24 +96,19 @@ public class LayoutManagementView extends AbstractView {
      * Bootstraps the new node with the current layout.
      * This action is invoked as a part of the add node workflow which requires the new node
      * to be added to the cluster to be bootstrapped with the existing layout of this cluster.
-     * This bootstraps the Layout and the Management server with the existing layout and also
+     * This bootstraps the Layout and the Management server with the existing layout which
      * initiates failure handling capabilities on the management server.
      *
      * @param endpoint New node endpoint.
      */
-    public void bootstrapNewNode(String endpoint) {
+    public boolean bootstrapNewNode(String endpoint) {
 
         // Bootstrap the to-be added node with the old layout.
         Layout layout = new Layout(runtime.getLayoutView().getLayout());
-        // Ignoring call result as the call returns ACK or throws an exception.
-        CFUtils.getUninterruptibly(runtime.getLayoutView().getRuntimeLayout(layout)
-                .getLayoutClient(endpoint)
-                .bootstrapLayout(layout));
-        CFUtils.getUninterruptibly(runtime.getLayoutView().getRuntimeLayout(layout)
-                .getManagementClient(endpoint)
-                .bootstrapManagement(layout));
-
+        runtime.getLayoutView().bootstrapLayoutServer(endpoint, layout);
+        runtime.getManagementView().bootstrapManagementServer(endpoint, layout);
         log.info("bootstrapNewNode: New node {} bootstrapped.", endpoint);
+        return true;
     }
 
     /**
