@@ -5,6 +5,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -140,5 +141,38 @@ public class CFUtils {
     public static <T> CompletableFuture<Void> allOf(Collection<CompletableFuture<T>> futures) {
         CompletableFuture<T>[] futuresArr = futures.toArray(new CompletableFuture[futures.size()]);
         return CompletableFuture.allOf(futuresArr);
+    }
+
+    /**
+     * Unwraps ExecutionException thrown from a CompletableFuture.
+     *
+     * @param throwable  Throwable to unwrap.
+     * @param throwableA Checked Exception to expose.
+     * @param <A>        Class of checked exception.
+     * @throws A Throws checked exception.
+     */
+    public static <A extends Throwable> void unwrap(Throwable throwable, Class<A> throwableA) throws A {
+
+        if (throwable instanceof ExecutionException || throwable instanceof CompletionException) {
+            if (throwableA.isInstance(throwable.getCause())) {
+                throw (A) throwable.getCause();
+            }
+            if (throwable.getCause() instanceof RuntimeException) {
+                throw (RuntimeException) throwable.getCause();
+            }
+            if (throwable.getCause() instanceof Error) {
+                throw (Error) throwable.getCause();
+            }
+            throw new RuntimeException(throwable.getCause());
+        }
+    }
+
+    /**
+     * Unwraps ExecutionException thrown from a CompletableFuture.
+     *
+     * @param throwable Throwable to unwrap.
+     */
+    public static void unwrap(Throwable throwable) {
+        unwrap(throwable, RuntimeException.class);
     }
 }

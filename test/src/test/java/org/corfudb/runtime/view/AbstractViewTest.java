@@ -38,6 +38,7 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -94,9 +95,11 @@ public abstract class AbstractViewTest extends AbstractCorfuTest {
     public AbstractViewTest() {
         // Force all new CorfuRuntimes to override the getRouterFn
         CorfuRuntime.overrideGetRouterFunction = this::getRouterFunction;
+        final Duration holeFillTimeout = Duration.ofSeconds(5);
         runtime = CorfuRuntime.fromParameters(CorfuRuntimeParameters.builder()
-            .nettyEventLoop(NETTY_EVENT_LOOP)
-            .build());
+                .nettyEventLoop(NETTY_EVENT_LOOP)
+                .holeFillTimeout(holeFillTimeout)
+                .build());
         // Default number of times to read before hole filling to 0
         // (most aggressive, to surface concurrency issues).
         runtime.getParameters().setHoleFillRetry(0);
