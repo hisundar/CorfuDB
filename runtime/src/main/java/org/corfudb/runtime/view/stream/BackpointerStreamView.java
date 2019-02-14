@@ -247,7 +247,6 @@ public class BackpointerStreamView extends AbstractQueuedStreamView {
 
         // Loop until we have reached the stop address.
         while (currentAddress > stopAddress  && Address.isAddress(currentAddress)) {
-            backpointerCount++;
 
             // Read the current address
             ILogData d;
@@ -294,6 +293,7 @@ public class BackpointerStreamView extends AbstractQueuedStreamView {
                 // if backpointer is a valid log address or Address.NON_EXIST
                 // (beginning of the stream), do not single step back on the log
                 if (Address.isAddress(tmp) || tmp == Address.NON_EXIST) {
+                    backpointerCount++;
                     currentAddress = tmp;
                     singleStep = false;
                 }
@@ -451,9 +451,17 @@ public class BackpointerStreamView extends AbstractQueuedStreamView {
         // should be reflected. For each address which is less than
         // maxGlobalAddress, we insert it into the read queue.
 
+        long stopAddress = Long.max(context.globalPointer, context.checkpointSnapshotAddress);
+
+        // Optimization: move from resolved queue to read queue available addresses.
+        if(context.globalPointer < context.maxResolution) {
+            fillFromResolved(context.maxResolution, context);
+            stopAddress = context.maxResolution;
+        }
+
         followBackpointers(context.id, context.readQueue,
                 latestTokenValue,
-                Long.max(context.globalPointer, context.checkpointSnapshotAddress),
+                stopAddress,
                 d -> BackpointerOp.INCLUDE);
 
         return ! context.readCpQueue.isEmpty() || !context.readQueue.isEmpty();
