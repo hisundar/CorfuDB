@@ -80,7 +80,9 @@ public class AddNodeWorkflow implements IWorkflow {
          */
         @Override
         public void impl(@Nonnull CorfuRuntime runtime) throws Exception {
-            runtime.getLayoutManagementView().bootstrapNewNode(request.getEndpoint());
+            runtime.getLayoutManagementView()
+                    .bootstrapNewNode(request.getEndpoint())
+                    .get();
         }
     }
 

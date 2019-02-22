@@ -2,6 +2,18 @@ package org.corfudb.runtime.view;
 
 import static org.corfudb.util.Utils.getTails;
 
+import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
+import org.corfudb.protocols.wireprotocol.TailsResponse;
+import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.exceptions.AlreadyBootstrappedException;
+import org.corfudb.runtime.exceptions.LayoutModificationException;
+import org.corfudb.runtime.exceptions.OutrankedException;
+import org.corfudb.runtime.exceptions.QuorumUnreachableException;
+import org.corfudb.runtime.exceptions.RecoveryException;
+import org.corfudb.util.CFUtils;
+
+import javax.annotation.Nonnull;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
@@ -10,19 +22,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
-
-import javax.annotation.Nonnull;
-
-import lombok.NonNull;
-import lombok.extern.slf4j.Slf4j;
-
-import org.corfudb.protocols.wireprotocol.TailsResponse;
-import org.corfudb.runtime.CorfuRuntime;
-import org.corfudb.runtime.exceptions.LayoutModificationException;
-import org.corfudb.runtime.exceptions.OutrankedException;
-import org.corfudb.runtime.exceptions.QuorumUnreachableException;
-import org.corfudb.runtime.exceptions.RecoveryException;
-import org.corfudb.util.CFUtils;
 
 /**
  * A view of the Layout Manager to manage reconfigurations of the Corfu Cluster.
@@ -101,14 +100,33 @@ public class LayoutManagementView extends AbstractView {
      *
      * @param endpoint New node endpoint.
      */
-    public boolean bootstrapNewNode(String endpoint) {
+    public CompletableFuture<Boolean> bootstrapNewNode(String endpoint) {
 
         // Bootstrap the to-be added node with the old layout.
         Layout layout = new Layout(runtime.getLayoutView().getLayout());
-        runtime.getLayoutView().bootstrapLayoutServer(endpoint, layout);
-        runtime.getManagementView().bootstrapManagementServer(endpoint, layout);
-        log.info("bootstrapNewNode: New node {} bootstrapped.", endpoint);
-        return true;
+
+        return runtime.getLayoutView()
+                .bootstrapLayoutServer(endpoint, layout)
+                .exceptionally(ex -> {
+                    if (ex instanceof AlreadyBootstrappedException) {
+                        log.info("bootstrapLayoutServer: Layout Server already bootstrapped.");
+                    }
+                    return true;
+                })
+                .thenCompose(result -> {
+                    return runtime.getManagementView().bootstrapManagementServer(endpoint, layout);
+                })
+                .exceptionally(ex -> {
+                    if (ex instanceof AlreadyBootstrappedException) {
+                        log.info("bootstrapManagementServer: Management Server already bootstrapped.");
+                    }
+                    return true;
+                })
+                .whenComplete((res, ex) -> {
+                    if (ex == null) {
+                        log.info("bootstrapNewNode: New node {} bootstrapped.", endpoint);
+                    }
+                });
     }
 
     /**

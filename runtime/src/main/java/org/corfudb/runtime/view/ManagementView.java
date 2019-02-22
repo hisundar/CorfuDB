@@ -1,5 +1,28 @@
 package org.corfudb.runtime.view;
 
+import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
+import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.clients.IClientRouter;
+import org.corfudb.runtime.clients.LayoutClient;
+import org.corfudb.runtime.exceptions.NetworkException;
+import org.corfudb.runtime.exceptions.WorkflowException;
+import org.corfudb.runtime.exceptions.WorkflowResultUnknownException;
+import org.corfudb.runtime.exceptions.WrongEpochException;
+import org.corfudb.runtime.view.ClusterStatusReport.ClusterStatus;
+import org.corfudb.runtime.view.ClusterStatusReport.ClusterStatusReliability;
+import org.corfudb.runtime.view.ClusterStatusReport.ConnectivityStatus;
+import org.corfudb.runtime.view.ClusterStatusReport.NodeStatus;
+import org.corfudb.runtime.view.Layout.LayoutSegment;
+import org.corfudb.runtime.view.workflows.AddNode;
+import org.corfudb.runtime.view.workflows.ForceRemoveNode;
+import org.corfudb.runtime.view.workflows.HealNode;
+import org.corfudb.runtime.view.workflows.RemoveNode;
+import org.corfudb.runtime.view.workflows.RestoreRedundancyMergeSegments;
+import org.corfudb.util.CFUtils;
+import org.corfudb.util.NodeLocator;
+
+import javax.annotation.Nonnull;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -13,32 +36,6 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import javax.annotation.Nonnull;
-
-import lombok.NonNull;
-import lombok.extern.slf4j.Slf4j;
-
-import org.corfudb.runtime.CorfuRuntime;
-import org.corfudb.runtime.clients.IClientRouter;
-import org.corfudb.runtime.clients.LayoutClient;
-import org.corfudb.runtime.exceptions.AlreadyBootstrappedException;
-import org.corfudb.runtime.exceptions.NetworkException;
-import org.corfudb.runtime.exceptions.WorkflowException;
-import org.corfudb.runtime.exceptions.WorkflowResultUnknownException;
-import org.corfudb.runtime.exceptions.WrongEpochException;
-import org.corfudb.runtime.view.ClusterStatusReport.ClusterStatus;
-import org.corfudb.runtime.view.ClusterStatusReport.ClusterStatusReliability;
-import org.corfudb.runtime.view.ClusterStatusReport.ConnectivityStatus;
-import org.corfudb.runtime.view.ClusterStatusReport.NodeStatus;
-import org.corfudb.runtime.view.Layout.LayoutSegment;
-import org.corfudb.runtime.view.workflows.AddNode;
-import org.corfudb.runtime.view.workflows.ForceRemoveNode;
-import org.corfudb.runtime.view.workflows.HealNode;
-import org.corfudb.runtime.view.workflows.RestoreRedundancyMergeSegments;
-import org.corfudb.runtime.view.workflows.RemoveNode;
-import org.corfudb.util.CFUtils;
-import org.corfudb.util.NodeLocator;
 
 /**
  * A view of the Management Service to manage reconfigurations of the Corfu Cluster.
@@ -589,18 +586,13 @@ public class ManagementView extends AbstractView {
     /**
      * Bootstraps the management server if not already bootstrapped.
      * If already bootstrapped, it completes silently.
-     *
-     * @param endpoint Endpoint ot bootstrap.
+     *  @param endpoint Endpoint ot bootstrap.
      * @param layout   Layout to bootstrap with.
      */
-    public void bootstrapManagementServer(@Nonnull String endpoint, @Nonnull Layout layout) {
-        try {
-            CFUtils.getUninterruptibly(runtime.getLayoutView().getRuntimeLayout(layout)
-                    .getManagementClient(endpoint)
-                    .bootstrapManagement(layout), AlreadyBootstrappedException.class);
-            log.info("bootstrapManagementServer: Management Server bootstrap successful.");
-        } catch (AlreadyBootstrappedException abe) {
-            log.info("bootstrapManagementServer: Management Server already bootstrapped.");
-        }
+    public CompletableFuture<Boolean> bootstrapManagementServer(@Nonnull String endpoint, @Nonnull Layout layout) {
+        return runtime.getLayoutView()
+                .getRuntimeLayout(layout)
+                .getManagementClient(endpoint)
+                .bootstrapManagement(layout);
     }
 }
