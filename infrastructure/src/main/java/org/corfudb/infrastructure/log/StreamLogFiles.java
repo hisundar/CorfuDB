@@ -466,7 +466,7 @@ public class StreamLogFiles implements StreamLog, StreamLogWithRankedAddressSpac
         }
 
         if (Checksum.getChecksum(buffer.array()) != metadata.getPayloadChecksum()) {
-            throw new DataCorruptionException("Invalid metadata check sum");
+            throw new DataCorruptionException("Invalid metadata checksum");
         }
 
         LogHeader header;
