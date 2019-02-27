@@ -13,26 +13,42 @@ import java.util.Map;
 
 @Slf4j
 public class StreamLogDataStoreTest {
+    private static final long INITIAL_ADDRESS = 0L;
+
     @Rule
     public TemporaryFolder tempDir = new TemporaryFolder();
 
     @Test
     public void testGetAndSave() {
+        StreamLogDataStore streamLogDs = getStreamLogDataStore();
+
+        final int tailSegment = 333;
+        streamLogDs.updateTailSegment(tailSegment);
+        assertEquals(tailSegment, streamLogDs.getTailSegment());
+
+        final int startingAddress = 555;
+        streamLogDs.updateStartingAddress(startingAddress);
+        assertEquals(startingAddress, streamLogDs.getStartingAddress());
+    }
+
+    @Test
+    public void testReset() {
+        StreamLogDataStore streamLogDs = getStreamLogDataStore();
+        streamLogDs.resetStartingAddress();
+        assertEquals(INITIAL_ADDRESS, streamLogDs.getStartingAddress());
+
+        streamLogDs.resetTailSegment();
+        assertEquals(INITIAL_ADDRESS, streamLogDs.getTailSegment());
+    }
+
+    private StreamLogDataStore getStreamLogDataStore() {
         Map<String, Object> opts = new HashMap<>();
         opts.put("--log-path", tempDir.getRoot().getAbsolutePath());
 
         DataStore ds = new DataStore(opts, val -> log.info("clean up"));
 
-        StreamLogDataStore streamLogDs = StreamLogDataStore.builder()
+        return StreamLogDataStore.builder()
                 .dataStore(ds)
                 .build();
-
-        final int tailSegment = 333;
-        streamLogDs.saveTailSegment(tailSegment);
-        assertEquals(tailSegment, streamLogDs.getTailSegment());
-
-        final int startingAddress = 555;
-        streamLogDs.saveStartingAddress(startingAddress);
-        assertEquals(startingAddress, streamLogDs.getStartingAddress());
     }
 }

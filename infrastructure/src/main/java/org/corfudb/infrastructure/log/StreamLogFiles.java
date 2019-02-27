@@ -228,9 +228,7 @@ public class StreamLogFiles implements StreamLog, StreamLogWithRankedAddressSpac
         logMetadata.updateGlobalTail(address);
         long segment = address / RECORDS_PER_LOG_FILE;
 
-        if (dataStore.getTailSegment() < segment) {
-            dataStore.saveTailSegment(segment);
-        }
+        dataStore.updateTailSegment(segment);
     }
 
     @Override
@@ -245,7 +243,7 @@ public class StreamLogFiles implements StreamLog, StreamLogWithRankedAddressSpac
         // This is due to the fact that updates on the local datastore don't
         // expose disk sync functionality.
         long newStartingAddress = address + 1;
-        dataStore.saveStartingAddress(newStartingAddress);
+        dataStore.updateStartingAddress(newStartingAddress);
         syncTailSegment(address);
         log.debug("Trimmed prefix, new starting address {}", newStartingAddress);
     }
@@ -1126,8 +1124,8 @@ public class StreamLogFiles implements StreamLog, StreamLogWithRankedAddressSpac
             }
         });
 
-        dataStore.saveStartingAddress(0L);
-        dataStore.saveTailSegment(0L);
+        dataStore.resetStartingAddress();
+        dataStore.resetTailSegment();
         logMetadata = new LogMetadata();
         writeChannels.clear();
         log.info("reset: Completed, end segment {}", endSegment);
