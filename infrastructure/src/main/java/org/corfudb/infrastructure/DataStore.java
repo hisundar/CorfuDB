@@ -1,11 +1,21 @@
 package org.corfudb.infrastructure;
 
+import static org.corfudb.infrastructure.utils.Persistence.syncDirectory;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheWriter;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.RemovalCause;
+import com.google.common.hash.Hasher;
+import com.google.common.hash.Hashing;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.corfudb.runtime.exceptions.DataCorruptionException;
+import org.corfudb.util.JsonUtils;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -16,21 +26,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.function.Consumer;
-
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-
-import com.google.common.hash.Hasher;
-import com.google.common.hash.Hashing;
-
-import lombok.AllArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import lombok.Getter;
-
-import org.corfudb.runtime.exceptions.DataCorruptionException;
-import org.corfudb.util.JsonUtils;
-
-import static org.corfudb.infrastructure.utils.Persistence.syncDirectory;
 
 /**
  * Stores data as JSON.
